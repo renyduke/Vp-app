@@ -1,0 +1,4 @@
+year,month,week,commodity,volume,encoded_by,encoded_at
+2024,3,1,"Rice (Per Kg.)",120.5,JohnDoe,2024-03-01T08:00:00Z
+2024,3,1,"Corn (Per Kg.)",85.0,JohnDoe,2024-03-01T08:30:00Z
+2024,3,1,"Cauliflower (Per Kg.)",45.2,JohnDoe,2024-03-01T09:00:00Z

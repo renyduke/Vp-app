@@ -1,11 +1,17 @@
-// DataScreen.tsx
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import NetInfo from '@react-native-community/netinfo';
 import { Picker } from '@react-native-picker/picker';
+import { decode } from 'base64-arraybuffer';
+import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
 import {
   Alert,
+  Dimensions,
+  FlatList,
+  Image,
+  KeyboardAvoidingView,
+  Modal,
   Platform,
   ScrollView,
   StyleSheet,
@@ -13,25 +19,16 @@ import {
   TextInput,
   TouchableOpacity,
   View,
-  FlatList,
-  Modal,
-  Dimensions,
-  Image,
-  KeyboardAvoidingView,
 } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '../src/supabaseClient';
-import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
-import Ionicons from 'react-native-vector-icons/Ionicons';
 
 const PENDING_KEY = 'agri_pending_entries';
+const HIDDEN_COMMODITIES_KEY = 'agri_hidden_commodities';
 const { width } = Dimensions.get('window');
 const isSmallScreen = width < 350;
 
-const commodities = [
-  'Cabbage','Carrots','Beans','Tomato','Pechay','Pepper','Squash',
-  'Green Onion','Potato','Sayote','Cucumber','Lettuce','Cauliflower',
-  'Broccoli','Radish','Camote','Ginger','Eggplant'
-];
+import { commodityCategories, CUSTOM_COMMODITIES_KEY, defaultCommodities } from '../src/constants';
 
 const months = [
   { label: 'January', value: 1 },
@@ -99,9 +96,13 @@ export default function DataScreen() {
   const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth() + 1);
   const [selectedWeek, setSelectedWeek] = useState(1);
 
-  const [selectedCommodity, setSelectedCommodity] = useState(commodities[0]);
+  const [allCommodities, setAllCommodities] = useState<string[]>(defaultCommodities);
+  const [selectedCommodity, setSelectedCommodity] = useState(defaultCommodities[0]);
   const [commoditySearch, setCommoditySearch] = useState('');
   const [mode, setMode] = useState<'volume' | 'price'>('volume');
+  const [showAddCommodity, setShowAddCommodity] = useState(false);
+  const [newCommodityName, setNewCommodityName] = useState('');
+  const [newCommodityUnit, setNewCommodityUnit] = useState('Per Kg.');
   const [volume, setVolume] = useState('');
   const [lowest, setLowest] = useState('');
   const [highest, setHighest] = useState('');
@@ -112,11 +113,12 @@ export default function DataScreen() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [currentUsername, setCurrentUsername] = useState('');
   const [collectorImage, setCollectorImage] = useState<string | null>(null);
-  
+  const [showProfileViewer, setShowProfileViewer] = useState(false);
+
   const [activities, setActivities] = useState<Activity[]>([]);
   const [isLoadingActivities, setIsLoadingActivities] = useState(false);
   const [showActivities, setShowActivities] = useState(true);
-  
+
   const [dataRecords, setDataRecords] = useState<DataRecord[]>([]);
   const [isLoadingRecords, setIsLoadingRecords] = useState(false);
   const [showDataRecords, setShowDataRecords] = useState(false);
@@ -124,12 +126,19 @@ export default function DataScreen() {
   const [editVolume, setEditVolume] = useState('');
   const [editLowest, setEditLowest] = useState('');
   const [editHighest, setEditHighest] = useState('');
-  const [editCommodity, setEditCommodity] = useState(commodities[0]);
+  const [editCommodity, setEditCommodity] = useState(defaultCommodities[0]);
   const [recordTypeFilter, setRecordTypeFilter] = useState<'all' | 'volume' | 'price'>('all');
   const [filterYear, setFilterYear] = useState(currentYear);
   const [filterMonth, setFilterMonth] = useState(new Date().getMonth() + 1);
   const [filterWeek, setFilterWeek] = useState<number | 'all'>('all');
   const [recordsSearch, setRecordsSearch] = useState('');
+  const [showManageCommodities, setShowManageCommodities] = useState(false);
+  const [editingCustomCommodity, setEditingCustomCommodity] = useState<string | null>(null);
+  const [editCustomCommodityName, setEditCustomCommodityName] = useState('');
+  const [editCustomCommodityUnit, setEditCustomCommodityUnit] = useState('Per Kg.');
+  const [manageSearch, setManageSearch] = useState('');
+  const [hiddenCommodities, setHiddenCommodities] = useState<string[]>([]);
+  const [isDarkMode, setIsDarkMode] = useState(false);
 
   const router = useRouter();
   const netInfoRef = useRef<any>(null);
@@ -137,8 +146,90 @@ export default function DataScreen() {
   const lowestInputRef = useRef<TextInput>(null);
   const highestInputRef = useRef<TextInput>(null);
 
+  const themeColors = {
+    background: isDarkMode ? '#121212' : '#f0f4f8',
+    card: isDarkMode ? '#1e1e1e' : '#fff',
+    text: isDarkMode ? '#e5e7eb' : '#1f2937',
+    subtext: isDarkMode ? '#9ca3af' : '#6b7280',
+    header: isDarkMode ? '#1a1a1a' : '#2d6a4f',
+    border: isDarkMode ? '#333' : '#e5e7eb',
+    inputBg: isDarkMode ? '#2a2a2a' : '#f9fafb',
+    sidebar: isDarkMode ? '#1a1a1a' : '#fff',
+    overlay: isDarkMode ? 'rgba(0,0,0,0.85)' : 'rgba(0,0,0,0.5)',
+    divider: isDarkMode ? '#333' : '#e5e7eb',
+    activityItem: isDarkMode ? '#262626' : '#f9fafb',
+  };
+
+  // Load custom commodities from Supabase & AsyncStorage
+  const loadCustomCommodities = async () => {
+    try {
+      let customList: string[] = [];
+      const raw = await AsyncStorage.getItem(CUSTOM_COMMODITIES_KEY);
+      if (raw) {
+        customList = JSON.parse(raw);
+      }
+
+      // Fetch from Supabase
+      const state = await NetInfo.fetch();
+      if (state.isConnected) {
+        const { data, error } = await supabase
+          .from('custom_commodities')
+          .select('name');
+
+        if (!error && data) {
+          const supabaseCommodities = data.map(item => item.name);
+          // Merge local and cloud commodities (avoid duplicates)
+          const mergedSet = new Set([...customList, ...supabaseCommodities]);
+          customList = Array.from(mergedSet);
+
+          // Update local storage with the merged list
+          await AsyncStorage.setItem(CUSTOM_COMMODITIES_KEY, JSON.stringify(customList));
+        }
+      }
+
+      const merged = [...defaultCommodities, ...customList];
+      setAllCommodities(merged);
+      
+      const hiddenRaw = await AsyncStorage.getItem(HIDDEN_COMMODITIES_KEY);
+      if (hiddenRaw) {
+        setHiddenCommodities(JSON.parse(hiddenRaw));
+      }
+    } catch (e) {
+      console.warn('Failed to load custom commodities', e);
+    }
+  };
+
+  useEffect(() => {
+    loadCustomCommodities();
+  }, []);
+
+  // Theme loading & persistence
+  useEffect(() => {
+    const loadTheme = async () => {
+      try {
+        const savedTheme = await AsyncStorage.getItem('themePreference');
+        if (savedTheme) {
+          setIsDarkMode(savedTheme === 'dark');
+        }
+      } catch (e) {
+        console.warn('Failed to load theme preference', e);
+      }
+    };
+    loadTheme();
+  }, []);
+
+  const toggleTheme = async () => {
+    try {
+      const newMode = !isDarkMode;
+      setIsDarkMode(newMode);
+      await AsyncStorage.setItem('themePreference', newMode ? 'dark' : 'light');
+    } catch (e) {
+      console.warn('Failed to save theme preference', e);
+    }
+  };
+
   // Filter commodities based on search
-  const filteredCommodities = commodities.filter(commodity =>
+  const filteredCommodities = allCommodities.filter(commodity =>
     commodity.toLowerCase().includes(commoditySearch.toLowerCase())
   );
 
@@ -154,13 +245,13 @@ export default function DataScreen() {
         if (userStr) {
           const user = JSON.parse(userStr);
           setCurrentUsername(user.username);
-          
+
           // Try to load from AsyncStorage first (for offline)
           const cachedImage = await AsyncStorage.getItem('collectorImage');
           if (cachedImage) {
             setCollectorImage(cachedImage);
           }
-          
+
           // Fetch profile from Supabase
           try {
             const { data: profileData, error } = await supabase
@@ -168,7 +259,7 @@ export default function DataScreen() {
               .select('avatar_url')
               .eq('username', user.username)
               .single();
-              
+
             if (!error && profileData?.avatar_url) {
               setCollectorImage(profileData.avatar_url);
               await AsyncStorage.setItem('collectorImage', profileData.avatar_url);
@@ -193,7 +284,7 @@ export default function DataScreen() {
     try {
       const state = await NetInfo.fetch();
       const isOnline = !!state.isConnected;
-      
+
       let loadedActivities: Activity[] = [];
 
       // Add timestamp activities from current session
@@ -258,8 +349,8 @@ export default function DataScreen() {
             type: 'pending_sync',
             commodity: entry.commodity,
             description: entry.type === 'volume' ? 'Volume data (pending sync)' : 'Price data (pending sync)',
-            details: entry.type === 'volume' 
-              ? `${entry.volume} kg` 
+            details: entry.type === 'volume'
+              ? `${entry.volume} kg`
               : `₱${entry.lowest} - ₱${entry.highest}`,
             timestamp: entry.encoded_at,
             user: entry.encoded_by,
@@ -270,7 +361,7 @@ export default function DataScreen() {
       });
 
       // Sort activities by timestamp (newest first)
-      loadedActivities.sort((a, b) => 
+      loadedActivities.sort((a, b) =>
         new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
       );
 
@@ -296,7 +387,7 @@ export default function DataScreen() {
     try {
       const state = await NetInfo.fetch();
       const isOnline = !!state.isConnected;
-      
+
       let allRecords: DataRecord[] = [];
 
       if (isOnline) {
@@ -372,21 +463,21 @@ export default function DataScreen() {
       // If showing "all", merge volume and price records for the same commodity and period
       if (recordTypeFilter === 'all') {
         const mergedRecordsMap = new Map<string, DataRecord>();
-        
+
         allRecords.forEach(record => {
           const key = `${record.year}-${record.month}-${record.week}-${record.commodity}`;
-          
+
           if (mergedRecordsMap.has(key)) {
             // Merge with existing record
             const existing = mergedRecordsMap.get(key)!;
-            
+
             if (record.type === 'volume' && !existing.volume) {
               mergedRecordsMap.set(key, {
                 ...existing,
                 volume: record.volume,
                 encoded_by: existing.encoded_by || record.encoded_by,
-                encoded_at: new Date(record.encoded_at) > new Date(existing.encoded_at) 
-                  ? record.encoded_at 
+                encoded_at: new Date(record.encoded_at) > new Date(existing.encoded_at)
+                  ? record.encoded_at
                   : existing.encoded_at,
                 type: 'merged',
                 isPending: existing.isPending || record.isPending
@@ -399,8 +490,8 @@ export default function DataScreen() {
                 highest_price: record.highest_price,
                 average_price: record.average_price,
                 encoded_by: existing.encoded_by || record.encoded_by,
-                encoded_at: new Date(record.encoded_at) > new Date(existing.encoded_at) 
-                  ? record.encoded_at 
+                encoded_at: new Date(record.encoded_at) > new Date(existing.encoded_at)
+                  ? record.encoded_at
                   : existing.encoded_at,
                 type: 'merged',
                 isPending: existing.isPending || record.isPending
@@ -413,7 +504,7 @@ export default function DataScreen() {
             });
           }
         });
-        
+
         allRecords = Array.from(mergedRecordsMap.values());
       } else {
         allRecords = allRecords.filter(record => record.type === recordTypeFilter);
@@ -491,11 +582,11 @@ export default function DataScreen() {
 
     try {
       if (volumes.length) {
-        const rows = volumes.map(v => ({ 
+        const rows = volumes.map(v => ({
           year: v.year,
           month: v.month,
           week: v.week,
-          commodity: v.commodity, 
+          commodity: v.commodity,
           volume: v.volume,
           encoded_by: v.encoded_by,
           encoded_at: v.encoded_at
@@ -521,7 +612,7 @@ export default function DataScreen() {
       }
 
       await AsyncStorage.removeItem(PENDING_KEY);
-      
+
       // Add sync activity
       const syncActivity: Activity = {
         id: `sync_${Date.now()}`,
@@ -535,10 +626,10 @@ export default function DataScreen() {
         isPending: false
       };
       setActivities(prev => [syncActivity, ...prev.slice(0, 9)]);
-      
+
       setSuccessMessage('All pending data synced successfully!');
       setShowSuccess(true);
-      
+
       loadActivities();
       if (showDataRecords) loadDataRecords();
     } catch (err: any) {
@@ -575,15 +666,47 @@ export default function DataScreen() {
 
     setIsSaving(true);
 
-    try {
-      const state = await NetInfo.fetch();
-      const isOnline = !!state.isConnected;
-      const timestamp = new Date().toISOString();
-      const periodLabel = `${months.find(m => m.value === selectedMonth)?.label} ${selectedYear}, Week ${selectedWeek}`;
+    const timestamp = new Date().toISOString();
+    const periodLabel = `${months.find(m => m.value === selectedMonth)?.label} ${selectedYear}, Week ${selectedWeek}`;
 
-      if (mode === 'volume') {
-        const volNum = parseFloat(volume);
-        const entry: PendingEntry = {
+    if (mode === 'volume') {
+      const volNum = parseFloat(volume);
+
+      // Always try Supabase first
+      try {
+        const { error } = await supabase.from('agri_volume').insert({
+          year: selectedYear,
+          month: selectedMonth,
+          week: selectedWeek,
+          commodity: selectedCommodity,
+          volume: volNum,
+          encoded_by: currentUsername,
+          encoded_at: timestamp
+        });
+
+        if (error) throw error;
+
+        // Success - saved to Supabase
+        const activity: Activity = {
+          id: `vol_${Date.now()}`,
+          type: 'volume_added',
+          commodity: selectedCommodity,
+          description: 'Volume data saved',
+          details: `${volNum} kg`,
+          timestamp,
+          user: currentUsername,
+          period: periodLabel,
+          isPending: false
+        };
+        setActivities(prev => [activity, ...prev.slice(0, 9)]);
+        setSuccessMessage('Volume data saved successfully!');
+        setVolume('');
+        setShowSuccess(true);
+      } catch (err: any) {
+        console.warn('Supabase save failed, saving offline', err);
+
+        // Fallback to offline storage
+        await addPending({
           type: 'volume',
           year: selectedYear,
           month: selectedMonth,
@@ -592,62 +715,67 @@ export default function DataScreen() {
           volume: volNum,
           encoded_by: currentUsername,
           encoded_at: timestamp
+        });
+
+        const activity: Activity = {
+          id: `pending_vol_${Date.now()}`,
+          type: 'pending_sync',
+          commodity: selectedCommodity,
+          description: 'Volume saved (offline)',
+          details: `${volNum} kg`,
+          timestamp,
+          user: currentUsername,
+          period: periodLabel,
+          isPending: true
         };
+        setActivities(prev => [activity, ...prev.slice(0, 9)]);
+        setSuccessMessage('Offline: Volume saved locally.\nWill sync when internet returns.');
+        setVolume('');
+        setShowSuccess(true);
+      }
+    } else {
+      const low = parseFloat(lowest);
+      const high = parseFloat(highest);
+      const avg = parseFloat(((low + high) / 2).toFixed(2));
 
-        if (isOnline) {
-          const { error } = await supabase.from('agri_volume').insert({
-            year: entry.year,
-            month: entry.month,
-            week: entry.week,
-            commodity: entry.commodity,
-            volume: entry.volume,
-            encoded_by: entry.encoded_by,
-            encoded_at: entry.encoded_at
-          });
-          if (error) throw error;
+      // Always try Supabase first
+      try {
+        const { error } = await supabase.from('agri_price').insert({
+          year: selectedYear,
+          month: selectedMonth,
+          week: selectedWeek,
+          commodity: selectedCommodity,
+          lowest_price: low,
+          highest_price: high,
+          average_price: avg,
+          encoded_by: currentUsername,
+          encoded_at: timestamp
+        });
 
-          // Add activity
-          const activity: Activity = {
-            id: `vol_${Date.now()}`,
-            type: 'volume_added',
-            commodity: selectedCommodity,
-            description: 'Volume data saved',
-            details: `${volNum} kg`,
-            timestamp,
-            user: currentUsername,
-            period: periodLabel,
-            isPending: false
-          };
-          setActivities(prev => [activity, ...prev.slice(0, 9)]);
-          
-          setSuccessMessage('Volume data saved successfully!');
-          setVolume('');
-        } else {
-          await addPending(entry);
-          
-          // Add pending activity
-          const activity: Activity = {
-            id: `pending_vol_${Date.now()}`,
-            type: 'pending_sync',
-            commodity: selectedCommodity,
-            description: 'Volume saved (offline)',
-            details: `${volNum} kg`,
-            timestamp,
-            user: currentUsername,
-            period: periodLabel,
-            isPending: true
-          };
-          setActivities(prev => [activity, ...prev.slice(0, 9)]);
-          
-          setSuccessMessage('Offline: Volume saved locally.\nWill sync when internet returns.');
-          setVolume('');
-        }
-      } else {
-        const low = parseFloat(lowest);
-        const high = parseFloat(highest);
-        const avg = parseFloat(((low + high) / 2).toFixed(2));
+        if (error) throw error;
 
-        const entry: PendingEntry = {
+        // Success - saved to Supabase
+        const activity: Activity = {
+          id: `price_${Date.now()}`,
+          type: 'price_added',
+          commodity: selectedCommodity,
+          description: 'Price data saved',
+          details: `₱${low} - ₱${high}`,
+          timestamp,
+          user: currentUsername,
+          period: periodLabel,
+          isPending: false
+        };
+        setActivities(prev => [activity, ...prev.slice(0, 9)]);
+        setSuccessMessage('Price data saved successfully!');
+        setLowest('');
+        setHighest('');
+        setShowSuccess(true);
+      } catch (err: any) {
+        console.warn('Supabase save failed, saving offline', err);
+
+        // Fallback to offline storage
+        await addPending({
           type: 'price',
           year: selectedYear,
           month: selectedMonth,
@@ -658,101 +786,28 @@ export default function DataScreen() {
           average: avg,
           encoded_by: currentUsername,
           encoded_at: timestamp
+        });
+
+        const activity: Activity = {
+          id: `pending_price_${Date.now()}`,
+          type: 'pending_sync',
+          commodity: selectedCommodity,
+          description: 'Price saved (offline)',
+          details: `₱${low} - ₱${high}`,
+          timestamp,
+          user: currentUsername,
+          period: periodLabel,
+          isPending: true
         };
-
-        if (isOnline) {
-          const { error } = await supabase.from('agri_price').insert({
-            year: entry.year,
-            month: entry.month,
-            week: entry.week,
-            commodity: entry.commodity,
-            lowest_price: entry.lowest,
-            highest_price: entry.highest,
-            average_price: entry.average,
-            encoded_by: entry.encoded_by,
-            encoded_at: entry.encoded_at
-          });
-          if (error) throw error;
-
-          // Add activity
-          const activity: Activity = {
-            id: `price_${Date.now()}`,
-            type: 'price_added',
-            commodity: selectedCommodity,
-            description: 'Price data saved',
-            details: `₱${low} - ₱${high}`,
-            timestamp,
-            user: currentUsername,
-            period: periodLabel,
-            isPending: false
-          };
-          setActivities(prev => [activity, ...prev.slice(0, 9)]);
-          
-          setSuccessMessage('Price data saved successfully!');
-          setLowest('');
-          setHighest('');
-        } else {
-          await addPending(entry);
-          
-          // Add pending activity
-          const activity: Activity = {
-            id: `pending_price_${Date.now()}`,
-            type: 'pending_sync',
-            commodity: selectedCommodity,
-            description: 'Price saved (offline)',
-            details: `₱${low} - ₱${high}`,
-            timestamp,
-            user: currentUsername,
-            period: periodLabel,
-            isPending: true
-          };
-          setActivities(prev => [activity, ...prev.slice(0, 9)]);
-          
-          setSuccessMessage('Offline: Price saved locally.\nWill sync when internet returns.');
-          setLowest('');
-          setHighest('');
-        }
-      }
-
-      setShowSuccess(true);
-    } catch (err: any) {
-      console.warn('Save failed', err);
-      Alert.alert('Error', 'Failed to save to server. Data stored offline.');
-
-      const timestamp = new Date().toISOString();
-      
-      if (mode === 'volume') {
-        await addPending({
-          type: 'volume',
-          year: selectedYear,
-          month: selectedMonth,
-          week: selectedWeek,
-          commodity: selectedCommodity,
-          volume: parseFloat(volume),
-          encoded_by: currentUsername,
-          encoded_at: timestamp
-        });
-        setVolume('');
-      } else {
-        const avg = parseFloat(((parseFloat(lowest) + parseFloat(highest)) / 2).toFixed(2));
-        await addPending({
-          type: 'price',
-          year: selectedYear,
-          month: selectedMonth,
-          week: selectedWeek,
-          commodity: selectedCommodity,
-          lowest: parseFloat(lowest),
-          highest: parseFloat(highest),
-          average: avg,
-          encoded_by: currentUsername,
-          encoded_at: timestamp
-        });
+        setActivities(prev => [activity, ...prev.slice(0, 9)]);
+        setSuccessMessage('Offline: Price saved locally.\nWill sync when internet returns.');
         setLowest('');
         setHighest('');
+        setShowSuccess(true);
       }
-    } finally {
-      setIsSaving(false);
     }
+
+    setIsSaving(false);
   };
 
   // Function to update profile picture
@@ -776,8 +831,17 @@ export default function DataScreen() {
 
   const pickImage = async () => {
     try {
-      const demoImageUrl = 'https://via.placeholder.com/150/2d6a4f/ffffff?text=' + currentUsername.charAt(0).toUpperCase();
-      await uploadImage(demoImageUrl);
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: true,
+        aspect: [1, 1],
+        quality: 0.5,
+        base64: true,
+      });
+
+      if (!result.canceled && result.assets && result.assets.length > 0) {
+        await uploadImage(result.assets[0].uri, result.assets[0].base64);
+      }
     } catch (error) {
       console.error('Error picking image:', error);
       Alert.alert('Error', 'Failed to pick image');
@@ -785,15 +849,81 @@ export default function DataScreen() {
   };
 
   const takePhoto = async () => {
-    Alert.alert('Coming Soon', 'Camera functionality will be implemented soon');
+    try {
+      const { status } = await ImagePicker.requestCameraPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission needed', 'Sorry, we need camera permissions to make this work!');
+        return;
+      }
+
+      const result = await ImagePicker.launchCameraAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: true,
+        aspect: [1, 1],
+        quality: 0.5,
+        base64: true,
+      });
+
+      if (!result.canceled && result.assets && result.assets.length > 0) {
+        await uploadImage(result.assets[0].uri, result.assets[0].base64);
+      }
+    } catch (error) {
+      console.error('Error taking photo:', error);
+      Alert.alert('Error', 'Failed to take photo');
+    }
   };
 
-  const uploadImage = async (imageUrl: string) => {
+  const uploadImage = async (imageUrl: string, base64?: string | null) => {
     setIsSaving(true);
     try {
+      // 1. First set it locally so the UI updates immediately
       setCollectorImage(imageUrl);
       await AsyncStorage.setItem('collectorImage', imageUrl);
-      
+
+      // 2. Upload to Supabase if we have the base64 data
+      if (base64) {
+        // Create a unique filename based on the username and a timestamp
+        const fileExt = 'jpg';
+        const fileName = `${currentUsername}-${Date.now()}.${fileExt}`;
+        const filePath = `avatars/${fileName}`;
+
+        // Upload the base64 image data to Supabase Storage
+        const { data, error: uploadError } = await supabase.storage
+          .from('avatars')
+          .upload(filePath, decode(base64), {
+            contentType: 'image/jpeg',
+            upsert: true
+          });
+
+        if (uploadError) {
+          throw uploadError;
+        }
+
+        // Get the public URL for the uploaded image
+        const { data: publicUrlData } = supabase.storage
+          .from('avatars')
+          .getPublicUrl(filePath);
+
+        const publicUrl = publicUrlData.publicUrl;
+
+        // 3. Update or Insert into collector_profiles table
+        const { error: dbError } = await supabase
+          .from('collector_profiles')
+          .upsert({
+            username: currentUsername,
+            avatar_url: publicUrl,
+            updated_at: new Date().toISOString(),
+          }, { onConflict: 'username' });
+
+        if (dbError) {
+          console.error("Error linking avatar to profile:", dbError);
+        } else {
+          // Cache the real public URL from supabase now
+          setCollectorImage(publicUrl);
+          await AsyncStorage.setItem('collectorImage', publicUrl);
+        }
+      }
+
       // Add profile update activity
       const activity: Activity = {
         id: `profile_${Date.now()}`,
@@ -806,11 +936,11 @@ export default function DataScreen() {
         isPending: false
       };
       setActivities(prev => [activity, ...prev.slice(0, 9)]);
-      
+
       Alert.alert('Success', 'Profile picture saved!');
     } catch (error) {
       console.error('Error saving image:', error);
-      Alert.alert('Error', 'Failed to save profile picture');
+      Alert.alert('Error', 'Failed to save profile picture completely to cloud, but saved locally.');
     } finally {
       setIsSaving(false);
     }
@@ -819,13 +949,13 @@ export default function DataScreen() {
   const startEditRecord = (record: DataRecord) => {
     setEditingRecord(record);
     setEditCommodity(record.commodity);
-    
+
     if (record.type === 'volume' || (record.type === 'merged' && record.volume !== undefined)) {
       setEditVolume(record.volume?.toString() || '');
     } else {
       setEditVolume('');
     }
-    
+
     if (record.type === 'price' || (record.type === 'merged' && record.lowest_price !== undefined)) {
       setEditLowest(record.lowest_price?.toString() || '');
       setEditHighest(record.highest_price?.toString() || '');
@@ -852,15 +982,15 @@ export default function DataScreen() {
         }
 
         if (isOnline && !editingRecord.isPending && !editingRecord.id.startsWith('pending_')) {
-          const recordId = editingRecord.id.startsWith('volume_') 
+          const recordId = editingRecord.id.startsWith('volume_')
             ? editingRecord.id.replace('volume_', '')
             : editingRecord.id;
           const { error } = await supabase
             .from('agri_volume')
-            .update({ 
+            .update({
               commodity: editCommodity,
-              volume: volNum, 
-              encoded_at: timestamp 
+              volume: volNum,
+              encoded_at: timestamp
             })
             .eq('year', editingRecord.year)
             .eq('month', editingRecord.month)
@@ -870,10 +1000,10 @@ export default function DataScreen() {
           if (error) throw error;
         } else {
           const pendingEntries = await loadPending();
-          const updatedEntries = pendingEntries.filter(entry => 
-            !(entry.year === editingRecord.year && 
-              entry.month === editingRecord.month && 
-              entry.week === editingRecord.week && 
+          const updatedEntries = pendingEntries.filter(entry =>
+            !(entry.year === editingRecord.year &&
+              entry.month === editingRecord.month &&
+              entry.week === editingRecord.week &&
               entry.commodity === editingRecord.commodity &&
               entry.type === 'volume')
           );
@@ -888,7 +1018,7 @@ export default function DataScreen() {
             encoded_by: currentUsername,
             encoded_at: timestamp
           };
-          
+
           updatedEntries.push(newEntry);
           await savePending(updatedEntries);
         }
@@ -906,7 +1036,7 @@ export default function DataScreen() {
           isPending: !isOnline
         };
         setActivities(prev => [activity, ...prev.slice(0, 9)]);
-        
+
         setSuccessMessage('Volume record updated successfully!');
       }
 
@@ -921,17 +1051,17 @@ export default function DataScreen() {
         }
 
         if (isOnline && !editingRecord.isPending && !editingRecord.id.startsWith('pending_')) {
-          const recordId = editingRecord.id.startsWith('price_') 
+          const recordId = editingRecord.id.startsWith('price_')
             ? editingRecord.id.replace('price_', '')
             : editingRecord.id;
           const { error } = await supabase
             .from('agri_price')
-            .update({ 
+            .update({
               commodity: editCommodity,
-              lowest_price: low, 
-              highest_price: high, 
+              lowest_price: low,
+              highest_price: high,
               average_price: avg,
-              encoded_at: timestamp 
+              encoded_at: timestamp
             })
             .eq('year', editingRecord.year)
             .eq('month', editingRecord.month)
@@ -941,10 +1071,10 @@ export default function DataScreen() {
           if (error) throw error;
         } else {
           const pendingEntries = await loadPending();
-          const updatedEntries = pendingEntries.filter(entry => 
-            !(entry.year === editingRecord.year && 
-              entry.month === editingRecord.month && 
-              entry.week === editingRecord.week && 
+          const updatedEntries = pendingEntries.filter(entry =>
+            !(entry.year === editingRecord.year &&
+              entry.month === editingRecord.month &&
+              entry.week === editingRecord.week &&
               entry.commodity === editingRecord.commodity &&
               entry.type === 'price')
           );
@@ -961,7 +1091,7 @@ export default function DataScreen() {
             encoded_by: currentUsername,
             encoded_at: timestamp
           };
-          
+
           updatedEntries.push(newEntry);
           await savePending(updatedEntries);
         }
@@ -979,7 +1109,7 @@ export default function DataScreen() {
           isPending: !isOnline
         };
         setActivities(prev => [activity, ...prev.slice(0, 9)]);
-        
+
         setSuccessMessage('Price record updated successfully!');
       }
 
@@ -988,7 +1118,7 @@ export default function DataScreen() {
       setEditLowest('');
       setEditHighest('');
       setShowSuccess(true);
-      
+
       loadActivities();
       if (showDataRecords) loadDataRecords();
     } catch (err: any) {
@@ -999,11 +1129,11 @@ export default function DataScreen() {
 
   const deleteRecord = async (record: DataRecord) => {
     let message = `Are you sure you want to delete `;
-    
+
     if (record.type === 'merged') {
       const hasVolume = record.volume !== undefined;
       const hasPrice = record.lowest_price !== undefined;
-      
+
       if (hasVolume && hasPrice) {
         message += `complete data record for ${record.commodity}? (Both volume and price data will be deleted)`;
       } else if (hasVolume) {
@@ -1016,7 +1146,7 @@ export default function DataScreen() {
     } else {
       message += `this ${record.type} record for ${record.commodity}?`;
     }
-    
+
     Alert.alert(
       'Delete Record',
       message,
@@ -1039,10 +1169,10 @@ export default function DataScreen() {
                     .eq('commodity', record.commodity);
                 } else {
                   const pendingEntries = await loadPending();
-                  const updatedEntries = pendingEntries.filter(entry => 
-                    !(entry.year === record.year && 
-                      entry.month === record.month && 
-                      entry.week === record.week && 
+                  const updatedEntries = pendingEntries.filter(entry =>
+                    !(entry.year === record.year &&
+                      entry.month === record.month &&
+                      entry.week === record.week &&
                       entry.commodity === record.commodity &&
                       entry.type === 'volume')
                   );
@@ -1059,10 +1189,10 @@ export default function DataScreen() {
                     .eq('commodity', record.commodity);
                 } else {
                   const pendingEntries = await loadPending();
-                  const updatedEntries = pendingEntries.filter(entry => 
-                    !(entry.year === record.year && 
-                      entry.month === record.month && 
-                      entry.week === record.week && 
+                  const updatedEntries = pendingEntries.filter(entry =>
+                    !(entry.year === record.year &&
+                      entry.month === record.month &&
+                      entry.week === record.week &&
                       entry.commodity === record.commodity &&
                       entry.type === 'price')
                   );
@@ -1083,9 +1213,9 @@ export default function DataScreen() {
                 isPending: false
               };
               setActivities(prev => [activity, ...prev.slice(0, 9)]);
-              
+
               Alert.alert('Success', 'Record deleted successfully');
-              
+
               loadActivities();
               if (showDataRecords) loadDataRecords();
             } catch (error) {
@@ -1154,19 +1284,19 @@ export default function DataScreen() {
   const renderActivityItem = ({ item }: { item: Activity }) => {
     const icon = getActivityIcon(item.type);
     const timeAgo = getTimeAgo(item.timestamp);
-    
+
     return (
-      <View style={styles.activityItem}>
+      <View style={[styles.activityItem, { backgroundColor: themeColors.activityItem, borderColor: themeColors.border }]}>
         <View style={styles.activityIconContainer}>
           <View style={[styles.activityIcon, { backgroundColor: icon.bg }]}>
-            <Ionicons name={icon.name} size={18} color={icon.color} />
+            <Ionicons name={icon.name as any} size={18} color={icon.color} />
           </View>
           <View style={styles.activityLine} />
         </View>
         <View style={styles.activityContent}>
           <View style={styles.activityHeader}>
             <View style={styles.activityTypeContainer}>
-              <Text style={styles.activityTypeLabel}>{getActivityTypeLabel(item.type)}</Text>
+              <Text style={[styles.activityTypeLabel, { color: isDarkMode ? '#9ca3af' : '#4b5563' }]}>{getActivityTypeLabel(item.type)}</Text>
               {item.isPending && (
                 <View style={styles.pendingBadge}>
                   <Ionicons name="cloud-upload-outline" size={10} color="#92400e" />
@@ -1176,8 +1306,8 @@ export default function DataScreen() {
             </View>
             <Text style={styles.activityTime}>{timeAgo}</Text>
           </View>
-          <Text style={styles.activityCommodity}>{item.commodity}</Text>
-          <Text style={styles.activityDescription}>{item.description}</Text>
+          <Text style={[styles.activityCommodity, { color: themeColors.text }]}>{item.commodity}</Text>
+          <Text style={[styles.activityDescription, { color: themeColors.text }]}>{item.description}</Text>
           {item.details && (
             <Text style={styles.activityDetails}>{item.details}</Text>
           )}
@@ -1212,7 +1342,7 @@ export default function DataScreen() {
   };
 
   const renderDataRecord = ({ item }: { item: DataRecord }) => (
-    <View style={styles.recordItem}>
+    <View style={[styles.recordItem, { backgroundColor: themeColors.activityItem, borderColor: themeColors.border }]}>
       <View style={styles.recordHeader}>
         <View style={styles.recordTypeBadge}>
           {item.type === 'merged' ? (
@@ -1246,22 +1376,22 @@ export default function DataScreen() {
             </View>
           )}
         </View>
-        <Text style={styles.recordCommodity}>{item.commodity}</Text>
+        <Text style={[styles.recordCommodity, { color: themeColors.text }]}>{item.commodity}</Text>
       </View>
-      
+
       <View style={styles.recordDetails}>
         <View style={styles.recordWeekRow}>
           <Ionicons name="calendar-outline" size={14} color="#6b7280" />
           <Text style={styles.recordWeek}>Week {item.week}</Text>
         </View>
-        
+
         {item.volume !== undefined && (
           <View style={styles.recordValueRow}>
             <Ionicons name="scale" size={16} color="#3b82f6" />
-            <Text style={styles.recordValue}>Volume: {item.volume} kg</Text>
+            <Text style={[styles.recordValue, { color: themeColors.text }]}>Volume: {item.volume} kg</Text>
           </View>
         )}
-        
+
         {item.lowest_price !== undefined && item.highest_price !== undefined && (
           <>
             <View style={styles.recordValueRow}>
@@ -1280,11 +1410,11 @@ export default function DataScreen() {
             )}
           </>
         )}
-        
+
         {item.volume === undefined && item.lowest_price === undefined && (
           <Text style={styles.noDataText}>No data available</Text>
         )}
-        
+
         <View style={styles.recordMetaRow}>
           <Ionicons name="person-outline" size={12} color="#9ca3af" />
           <Text style={styles.recordMeta}>
@@ -1292,16 +1422,16 @@ export default function DataScreen() {
           </Text>
         </View>
       </View>
-      
+
       <View style={styles.recordActions}>
-        <TouchableOpacity 
+        <TouchableOpacity
           style={styles.editRecordButton}
           onPress={() => startEditRecord(item)}
         >
           <Ionicons name="create-outline" size={16} color="#fff" />
           <Text style={styles.editRecordButtonText}>Edit</Text>
         </TouchableOpacity>
-        <TouchableOpacity 
+        <TouchableOpacity
           style={styles.deleteRecordButton}
           onPress={() => deleteRecord(item)}
         >
@@ -1313,7 +1443,7 @@ export default function DataScreen() {
   );
 
   const CollectorProfile = () => (
-    <TouchableOpacity 
+    <TouchableOpacity
       style={styles.collectorProfile}
       onPress={updateProfilePicture}
       activeOpacity={0.8}
@@ -1341,7 +1471,7 @@ export default function DataScreen() {
   );
 
   const ActivitiesSection = () => (
-    <View style={styles.activitiesCard}>
+    <View style={[styles.activitiesCard, { backgroundColor: themeColors.card, borderColor: themeColors.border }]}>
       <View style={styles.activitiesHeader}>
         <View style={styles.activitiesTitleRow}>
           <Ionicons name="time-outline" size={24} color="#2d6a4f" />
@@ -1353,7 +1483,7 @@ export default function DataScreen() {
           </View>
         </View>
         <View style={styles.activitiesActions}>
-          <TouchableOpacity 
+          <TouchableOpacity
             style={[styles.refreshButtonSmall, isSmallScreen && styles.iconOnlyButton]}
             onPress={loadActivities}
           >
@@ -1362,7 +1492,7 @@ export default function DataScreen() {
               <Text style={styles.refreshButtonSmallText}>Refresh</Text>
             )}
           </TouchableOpacity>
-          <TouchableOpacity 
+          <TouchableOpacity
             style={[styles.viewAllButton, isSmallScreen && styles.iconOnlyButton]}
             onPress={() => setShowDataRecords(true)}
           >
@@ -1437,43 +1567,43 @@ export default function DataScreen() {
   );
 
   return (
-    <KeyboardAvoidingView 
-      style={styles.container}
+    <KeyboardAvoidingView
+      style={[styles.container, { backgroundColor: themeColors.background }]}
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
-      <View style={styles.header}>
-        <TouchableOpacity 
-          style={styles.menuButton} 
+      <View style={[styles.header, { backgroundColor: themeColors.header }]}>
+        <TouchableOpacity
+          style={styles.menuButton}
           onPress={() => setSidebarOpen(!sidebarOpen)}
         >
           <Ionicons name="menu-outline" size={28} color="#fff" />
         </TouchableOpacity>
-        
+
         <View style={styles.headerCenter}>
           <Text style={styles.headerTitle}>AgriData Collector</Text>
           <Text style={styles.headerSubtitle}>Agricultural Data Collection System</Text>
         </View>
-        
+
         <CollectorProfile />
       </View>
 
       {!showDataRecords ? (
-        <ScrollView style={styles.content} contentContainerStyle={{ paddingBottom: 30 }}>
-          <View style={styles.card}>
+        <ScrollView style={[styles.content, { backgroundColor: themeColors.background }]} contentContainerStyle={{ paddingBottom: 30 }}>
+          <View style={[styles.card, { backgroundColor: themeColors.card }]}>
             <View style={styles.cardHeader}>
               <View style={styles.cardHeaderLeft}>
                 <View style={[styles.modeIcon, mode === 'volume' ? styles.volumeMode : styles.priceMode]}>
-                  <Ionicons 
-                    name={mode === 'volume' ? "scale-outline" : "cash-outline"} 
-                    size={24} 
-                    color={mode === 'volume' ? "#1e40af" : "#92400e"} 
+                  <Ionicons
+                    name={mode === 'volume' ? "scale-outline" : "cash-outline"}
+                    size={24}
+                    color={mode === 'volume' ? "#1e40af" : "#92400e"}
                   />
                 </View>
                 <View>
-                  <Text style={styles.cardTitle}>
+                  <Text style={[styles.cardTitle, { color: themeColors.text }]}>
                     {mode === 'volume' ? 'Volume Data Entry' : 'Price Data Entry'}
                   </Text>
-                  <Text style={styles.cardSubtitle}>Enter weekly agricultural data</Text>
+                  <Text style={[styles.cardSubtitle, { color: themeColors.subtext }]}>Enter weekly agricultural data</Text>
                 </View>
               </View>
               <View style={styles.modeSwitch}>
@@ -1481,10 +1611,10 @@ export default function DataScreen() {
                   style={[styles.modeButton, mode === 'volume' && styles.activeModeButton]}
                   onPress={() => setMode('volume')}
                 >
-                  <Ionicons 
-                    name="scale" 
-                    size={16} 
-                    color={mode === 'volume' ? '#fff' : '#6b7280'} 
+                  <Ionicons
+                    name="scale"
+                    size={16}
+                    color={mode === 'volume' ? '#fff' : '#6b7280'}
                   />
                   <Text style={[styles.modeButtonText, mode === 'volume' && styles.activeModeButtonText]}>
                     Volume
@@ -1494,10 +1624,10 @@ export default function DataScreen() {
                   style={[styles.modeButton, mode === 'price' && styles.activeModeButton]}
                   onPress={() => setMode('price')}
                 >
-                  <Ionicons 
-                    name="cash" 
-                    size={16} 
-                    color={mode === 'price' ? '#fff' : '#6b7280'} 
+                  <Ionicons
+                    name="cash"
+                    size={16}
+                    color={mode === 'price' ? '#fff' : '#6b7280'}
                   />
                   <Text style={[styles.modeButtonText, mode === 'price' && styles.activeModeButtonText]}>
                     Price
@@ -1560,45 +1690,130 @@ export default function DataScreen() {
 
             {/* Commodity Search and Selection */}
             <View style={styles.formGroup}>
-              <Text style={styles.label}>Commodity</Text>
-              
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                <Text style={[styles.label, { color: themeColors.text }]}>Commodity</Text>
+                <TouchableOpacity
+                  style={styles.addCommodityBtn}
+                  onPress={() => setShowAddCommodity(true)}
+                >
+                  <Ionicons name="add-circle-outline" size={18} color="#fff" />
+                  <Text style={styles.addCommodityBtnText}>Add New</Text>
+                </TouchableOpacity>
+              </View>
+
               {/* Search Bar */}
               <View style={styles.searchContainer}>
                 <Ionicons name="search-outline" size={20} color="#9ca3af" style={styles.searchIcon} />
-                <TextInput
-                  style={styles.searchInput}
-                  placeholder="Search commodity..."
-                  value={commoditySearch}
-                  onChangeText={setCommoditySearch}
-                  placeholderTextColor="#9ca3af"
-                />
+                   <TextInput
+                    style={[styles.searchInput, { color: themeColors.text }]}
+                    placeholder="Search commodity..."
+                    value={commoditySearch}
+                    onChangeText={setCommoditySearch}
+                    placeholderTextColor={isDarkMode ? "#777" : "#9ca3af"}
+                  />
                 {commoditySearch.length > 0 && (
-                  <TouchableOpacity onPress={() => setCommoditySearch('')}>
-                    <Ionicons name="close-circle" size={20} color="#9ca3af" />
+                   <TouchableOpacity onPress={() => setCommoditySearch('')}>
+                    <Ionicons name="close-circle" size={20} color={isDarkMode ? "#666" : "#9ca3af"} />
                   </TouchableOpacity>
                 )}
               </View>
 
-              {/* Commodity Picker with Search Results */}
+              {/* Commodity Picker with Category Labels */}
               <View style={styles.pickerWrap}>
                 <Picker
                   selectedValue={selectedCommodity}
-                  onValueChange={(v) => setSelectedCommodity(v)}
+                  onValueChange={(v) => {
+                    if (v && !v.startsWith('__category__')) setSelectedCommodity(v);
+                  }}
                   style={styles.picker}
                 >
-                  {filteredCommodities.map((c) => (
-                    <Picker.Item 
-                      key={c} 
-                      label={c} 
-                      value={c} 
+                  {commoditySearch.trim() === '' ? (
+                    // Show categorized list
+                    commodityCategories.map((cat) => [
+                      <Picker.Item
+                        key={`cat_${cat.label}`}
+                        label={`━━ ${cat.label} ━━`}
+                        value={`__category__${cat.label}`}
+                        enabled={false}
+                        color="#2d6a4f"
+                      />,
+                      ...cat.items.map((c) => (
+                        <Picker.Item key={c} label={`   ${c}`} value={c} />
+                      )),
+                    ]).flat()
+                  ) : (
+                    // Show filtered results
+                    filteredCommodities.map((c) => (
+                      <Picker.Item key={c} label={c} value={c} />
+                    ))
+                  )}
+                  {/* Custom commodities section */}
+                  {allCommodities.length > defaultCommodities.length && commoditySearch.trim() === '' && (
+                    <Picker.Item
+                      key="cat_custom"
+                      label="━━ ✏️ Custom Added ━━"
+                      value="__category__custom"
+                      enabled={false}
+                      color="#2d6a4f"
                     />
-                  ))}
+                  )}
+                  {commoditySearch.trim() === '' && allCommodities
+                    .filter(c => !defaultCommodities.includes(c))
+                    .map((c) => (
+                      <Picker.Item key={c} label={`   ${c}`} value={c} />
+                    ))
+                  }
                 </Picker>
               </View>
 
+              {selectedCommodity && !selectedCommodity.startsWith('__category__') && (
+                <View style={{ flexDirection: 'row', justifyContent: 'flex-end', marginTop: -5, marginBottom: 15 }}>
+                  {!defaultCommodities.includes(selectedCommodity) && (
+                    <TouchableOpacity 
+                      style={{ marginRight: 15 }}
+                      onPress={() => {
+                        Alert.alert('Delete', `Delete custom commodity "${selectedCommodity}"?`, [
+                          { text: 'Cancel', style: 'cancel' },
+                          {
+                            text: 'Delete',
+                            style: 'destructive',
+                            onPress: async () => {
+                              const { error } = await supabase.from('custom_commodities').delete().eq('name', selectedCommodity);
+                              const raw = await AsyncStorage.getItem(CUSTOM_COMMODITIES_KEY);
+                              let list = raw ? JSON.parse(raw) : [];
+                              list = list.filter((c: string) => c !== selectedCommodity);
+                              await AsyncStorage.setItem(CUSTOM_COMMODITIES_KEY, JSON.stringify(list));
+                              setAllCommodities([...defaultCommodities, ...list]);
+                              setSelectedCommodity(defaultCommodities[0]);
+                            }
+                          }
+                        ]);
+                      }}
+                    >
+                      <Text style={{ color: '#ef4444', fontSize: 14 }}>Delete</Text>
+                    </TouchableOpacity>
+                  )}
+                  <TouchableOpacity onPress={() => {
+                    setEditingCustomCommodity(selectedCommodity);
+                    const nameMatch = selectedCommodity.match(/^(.*) \((.*)\)$/);
+                    if (nameMatch) {
+                      setEditCustomCommodityName(nameMatch[1]);
+                      setEditCustomCommodityUnit(nameMatch[2]);
+                    } else {
+                      setEditCustomCommodityName(selectedCommodity);
+                      setEditCustomCommodityUnit('Per Kg.');
+                    }
+                  }}>
+                    <Text style={{ color: '#3b82f6', fontSize: 14 }}>
+                      {defaultCommodities.includes(selectedCommodity) ? 'Override Default' : 'Edit Selected'}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+
               {/* Search Results Count */}
               <Text style={styles.searchResults}>
-                Showing {filteredCommodities.length} of {commodities.length} commodities
+                Showing {filteredCommodities.length} of {allCommodities.length} commodities
               </Text>
             </View>
 
@@ -1607,14 +1822,14 @@ export default function DataScreen() {
                 <Text style={styles.label}>Volume (Kilograms)</Text>
                 <View style={styles.inputWithIcon}>
                   <Ionicons name="scale" size={20} color="#3b82f6" style={styles.inputIcon} />
-                  <TextInput
+                   <TextInput
                     ref={volumeInputRef}
-                    style={styles.input}
+                    style={[styles.input, { color: themeColors.text }]}
                     placeholder="Enter volume in kg"
                     keyboardType="numeric"
                     value={volume}
                     onChangeText={setVolume}
-                    placeholderTextColor="#9ca3af"
+                    placeholderTextColor={isDarkMode ? "#777" : "#9ca3af"}
                   />
                   {volume.length > 0 && (
                     <Text style={styles.inputUnit}>kg</Text>
@@ -1670,9 +1885,9 @@ export default function DataScreen() {
               </>
             )}
 
-            <TouchableOpacity 
-              style={[styles.saveButton, mode === 'volume' ? styles.volumeSaveButton : styles.priceSaveButton]} 
-              onPress={handleSave} 
+            <TouchableOpacity
+              style={[styles.saveButton, mode === 'volume' ? styles.volumeSaveButton : styles.priceSaveButton]}
+              onPress={handleSave}
               disabled={isSaving}
               activeOpacity={0.8}
             >
@@ -1683,10 +1898,10 @@ export default function DataScreen() {
                 </View>
               ) : (
                 <>
-                  <Ionicons 
-                    name={mode === 'volume' ? "save-outline" : "cash-outline"} 
-                    size={20} 
-                    color="#fff" 
+                  <Ionicons
+                    name={mode === 'volume' ? "save-outline" : "cash-outline"}
+                    size={20}
+                    color="#fff"
                   />
                   <Text style={styles.saveButtonText}>
                     Save {mode === 'volume' ? 'Volume' : 'Price'} Data
@@ -1699,10 +1914,10 @@ export default function DataScreen() {
           <ActivitiesSection />
         </ScrollView>
       ) : (
-        <ScrollView style={styles.content} contentContainerStyle={{ paddingBottom: 30 }}>
+        <ScrollView style={[styles.content, { backgroundColor: themeColors.background }]} contentContainerStyle={{ paddingBottom: 30 }}>
           <View style={styles.recordsHeader}>
             <View style={styles.recordsTitleRow}>
-              <TouchableOpacity 
+              <TouchableOpacity
                 style={styles.backButton}
                 onPress={() => setShowDataRecords(false)}
               >
@@ -1716,9 +1931,9 @@ export default function DataScreen() {
             </View>
           </View>
 
-          <View style={styles.filterCard}>
+          <View style={[styles.filterCard, { backgroundColor: themeColors.card }]}>
             <Text style={styles.filterTitle}>Filter Records</Text>
-            
+
             {/* Search Bar */}
             <View style={styles.searchContainer}>
               <Ionicons name="search-outline" size={20} color="#9ca3af" style={styles.searchIcon} />
@@ -1788,10 +2003,10 @@ export default function DataScreen() {
                   ]}
                   onPress={() => setRecordTypeFilter('all')}
                 >
-                  <Ionicons 
-                    name="list-outline" 
-                    size={16} 
-                    color={recordTypeFilter === 'all' ? '#fff' : '#6b7280'} 
+                  <Ionicons
+                    name="list-outline"
+                    size={16}
+                    color={recordTypeFilter === 'all' ? '#fff' : '#6b7280'}
                   />
                   <Text style={[
                     styles.typeFilterButtonText,
@@ -1805,10 +2020,10 @@ export default function DataScreen() {
                   ]}
                   onPress={() => setRecordTypeFilter('volume')}
                 >
-                  <Ionicons 
-                    name="scale" 
-                    size={16} 
-                    color={recordTypeFilter === 'volume' ? '#fff' : '#6b7280'} 
+                  <Ionicons
+                    name="scale"
+                    size={16}
+                    color={recordTypeFilter === 'volume' ? '#fff' : '#6b7280'}
                   />
                   <Text style={[
                     styles.typeFilterButtonText,
@@ -1822,10 +2037,10 @@ export default function DataScreen() {
                   ]}
                   onPress={() => setRecordTypeFilter('price')}
                 >
-                  <Ionicons 
-                    name="cash" 
-                    size={16} 
-                    color={recordTypeFilter === 'price' ? '#fff' : '#6b7280'} 
+                  <Ionicons
+                    name="cash"
+                    size={16}
+                    color={recordTypeFilter === 'price' ? '#fff' : '#6b7280'}
                   />
                   <Text style={[
                     styles.typeFilterButtonText,
@@ -1835,7 +2050,7 @@ export default function DataScreen() {
               </View>
             </View>
 
-            <TouchableOpacity 
+            <TouchableOpacity
               style={styles.refreshButton}
               onPress={loadDataRecords}
             >
@@ -1844,7 +2059,7 @@ export default function DataScreen() {
             </TouchableOpacity>
           </View>
 
-          <View style={styles.recordsListCard}>
+          <View style={[styles.recordsListCard, { backgroundColor: themeColors.card }]}>
             <View style={styles.recordsListHeader}>
               <View>
                 <Text style={styles.recordsListTitle}>
@@ -1899,28 +2114,28 @@ export default function DataScreen() {
 
       {sidebarOpen && (
         <>
-          <TouchableOpacity 
-            style={styles.overlay} 
+          <TouchableOpacity
+            style={[styles.overlay, { backgroundColor: themeColors.overlay }]}
             onPress={() => setSidebarOpen(false)}
             activeOpacity={1}
           />
-          <View style={styles.sidebar}>
+          <View style={[styles.sidebar, { backgroundColor: themeColors.sidebar }]}>
             <View style={styles.sidebarHeader}>
               <View style={styles.sidebarProfileSection}>
-                <TouchableOpacity 
+                <TouchableOpacity
                   style={styles.sidebarProfileImage}
-                  onPress={updateProfilePicture}
+                  onPress={() => setShowProfileViewer(true)}
                   activeOpacity={0.8}
                 >
                   {collectorImage ? (
                     <Image source={{ uri: collectorImage }} style={styles.sidebarProfileImg} />
                   ) : (
                     <View style={styles.sidebarProfileIcon}>
-                      <Ionicons name="person" size={32} color="#fff" />
+                      <Ionicons name="person" size={40} color="#fff" />
                     </View>
                   )}
                   <View style={styles.sidebarProfileEditBadge}>
-                    <Ionicons name="camera-outline" size={14} color="#fff" />
+                    <Ionicons name="expand-outline" size={14} color="#fff" />
                   </View>
                 </TouchableOpacity>
                 <View style={styles.sidebarProfileInfo}>
@@ -1932,58 +2147,79 @@ export default function DataScreen() {
                   </View>
                 </View>
               </View>
-              <TouchableOpacity 
-                style={styles.closeButton} 
+              <TouchableOpacity
+                style={styles.closeButton}
                 onPress={() => setSidebarOpen(false)}
               >
                 <Ionicons name="close-outline" size={24} color="#fff" />
               </TouchableOpacity>
             </View>
 
-            <ScrollView style={styles.sidebarMenu}>
+            <ScrollView style={styles.sidebarMenu} showsVerticalScrollIndicator={false}>
+              <View style={styles.sidebarSection}>
+                <Text style={styles.sidebarSectionTitle}>Appearance</Text>
+                <TouchableOpacity
+                  style={styles.menuItem}
+                  onPress={toggleTheme}
+                >
+                  <View style={styles.menuIconContainer}>
+                    <Ionicons 
+                      name={isDarkMode ? "moon" : "sunny-outline"} 
+                      size={20} 
+                      color={isDarkMode ? "#fbbf24" : "#6b7280"} 
+                    />
+                  </View>
+                  <Text style={styles.menuText}>{isDarkMode ? 'Dark Mode' : 'Light Mode'}</Text>
+                  <View style={{ flex: 1 }} />
+                  <View style={[styles.themeToggle, isDarkMode ? styles.themeToggleActive : styles.themeToggleInactive]}>
+                    <View style={[styles.themeToggleCircle, isDarkMode ? styles.themeToggleCircleActive : styles.themeToggleCircleInactive]} />
+                  </View>
+                </TouchableOpacity>
+              </View>
+
               <View style={styles.sidebarSection}>
                 <Text style={styles.sidebarSectionTitle}>Data Entry</Text>
-                <TouchableOpacity 
-                  style={[styles.menuItem, mode === 'volume' && styles.activeMenuItem]}
+                <TouchableOpacity
+                  style={[styles.menuItem, mode === 'volume' && (isDarkMode ? { backgroundColor: '#333' } : styles.activeMenuItem)]}
                   onPress={() => {
                     setMode('volume');
                     setSidebarOpen(false);
                   }}
                 >
-                  <View style={styles.menuIconContainer}>
-                    <Ionicons name="scale-outline" size={20} color={mode === 'volume' ? '#2d6a4f' : '#6b7280'} />
+                  <View style={[styles.menuIconContainer, { backgroundColor: isDarkMode ? '#222' : '#f3f4f6' }]}>
+                    <Ionicons name="scale-outline" size={20} color={mode === 'volume' ? (isDarkMode ? '#4ade80' : '#2d6a4f') : (isDarkMode ? '#9ca3af' : '#6b7280')} />
                   </View>
-                  <Text style={[styles.menuText, mode === 'volume' && styles.activeMenuText]}>
+                  <Text style={[styles.menuText, { color: isDarkMode ? '#e5e7eb' : '#4b5563' }, mode === 'volume' && (isDarkMode ? { color: '#4ade80', fontWeight: '600' } : styles.activeMenuText)]}>
                     Volume Entry
                   </Text>
                 </TouchableOpacity>
 
-                <TouchableOpacity 
-                  style={[styles.menuItem, mode === 'price' && styles.activeMenuItem]}
+                <TouchableOpacity
+                  style={[styles.menuItem, mode === 'price' && (isDarkMode ? { backgroundColor: '#333' } : styles.activeMenuItem)]}
                   onPress={() => {
                     setMode('price');
                     setSidebarOpen(false);
                   }}
                 >
-                  <View style={styles.menuIconContainer}>
-                    <Ionicons name="cash-outline" size={20} color={mode === 'price' ? '#2d6a4f' : '#6b7280'} />
+                  <View style={[styles.menuIconContainer, { backgroundColor: isDarkMode ? '#222' : '#f3f4f6' }]}>
+                    <Ionicons name="cash-outline" size={20} color={mode === 'price' ? (isDarkMode ? '#4ade80' : '#2d6a4f') : (isDarkMode ? '#9ca3af' : '#6b7280')} />
                   </View>
-                  <Text style={[styles.menuText, mode === 'price' && styles.activeMenuText]}>
+                  <Text style={[styles.menuText, { color: isDarkMode ? '#e5e7eb' : '#4b5563' }, mode === 'price' && (isDarkMode ? { color: '#4ade80', fontWeight: '600' } : styles.activeMenuText)]}>
                     Price Entry
                   </Text>
                 </TouchableOpacity>
 
-                <TouchableOpacity 
-                  style={[styles.menuItem, showDataRecords && styles.activeMenuItem]}
+                <TouchableOpacity
+                  style={[styles.menuItem, showDataRecords && (isDarkMode ? { backgroundColor: '#333' } : styles.activeMenuItem)]}
                   onPress={() => {
                     setShowDataRecords(true);
                     setSidebarOpen(false);
                   }}
                 >
-                  <View style={styles.menuIconContainer}>
-                    <Ionicons name="document-text-outline" size={20} color={showDataRecords ? '#2d6a4f' : '#6b7280'} />
+                  <View style={[styles.menuIconContainer, { backgroundColor: isDarkMode ? '#222' : '#f3f4f6' }]}>
+                    <Ionicons name="document-text-outline" size={20} color={showDataRecords ? (isDarkMode ? '#4ade80' : '#2d6a4f') : (isDarkMode ? '#9ca3af' : '#6b7280')} />
                   </View>
-                  <Text style={[styles.menuText, showDataRecords && styles.activeMenuText]}>
+                  <Text style={[styles.menuText, { color: isDarkMode ? '#e5e7eb' : '#4b5563' }, showDataRecords && (isDarkMode ? { color: '#4ade80', fontWeight: '600' } : styles.activeMenuText)]}>
                     Data Records
                   </Text>
                 </TouchableOpacity>
@@ -1991,7 +2227,7 @@ export default function DataScreen() {
 
               <View style={styles.sidebarSection}>
                 <Text style={styles.sidebarSectionTitle}>Tools</Text>
-                <TouchableOpacity 
+                <TouchableOpacity
                   style={styles.menuItem}
                   onPress={() => {
                     loadActivities();
@@ -2004,7 +2240,7 @@ export default function DataScreen() {
                   <Text style={styles.menuText}>Refresh Activities</Text>
                 </TouchableOpacity>
 
-                <TouchableOpacity 
+                <TouchableOpacity
                   style={styles.menuItem}
                   onPress={syncPending}
                 >
@@ -2017,7 +2253,7 @@ export default function DataScreen() {
 
               <View style={styles.sidebarSection}>
                 <Text style={styles.sidebarSectionTitle}>Account</Text>
-                <TouchableOpacity 
+                <TouchableOpacity
                   style={styles.menuItem}
                   onPress={() => {
                     Alert.alert('Coming Soon', 'Profile settings will be available soon!');
@@ -2030,20 +2266,21 @@ export default function DataScreen() {
                   <Text style={styles.menuText}>Settings</Text>
                 </TouchableOpacity>
 
-                <TouchableOpacity 
+
+                <TouchableOpacity
                   style={styles.menuItem}
                   onPress={() => {
-                    Alert.alert('Help', 'Contact support for assistance.');
+                    Alert.alert('Help', 'Contact support at support@agridata.gov');
                     setSidebarOpen(false);
                   }}
                 >
                   <View style={styles.menuIconContainer}>
                     <Ionicons name="help-circle-outline" size={20} color="#6b7280" />
                   </View>
-                  <Text style={styles.menuText}>Help & Support</Text>
+                  <Text style={styles.menuText}>Support</Text>
                 </TouchableOpacity>
 
-                <TouchableOpacity 
+                <TouchableOpacity
                   style={styles.menuItem}
                   onPress={handleLogout}
                 >
@@ -2055,9 +2292,9 @@ export default function DataScreen() {
               </View>
             </ScrollView>
 
-            <View style={styles.sidebarFooter}>
-              <Text style={styles.footerText}>AgriData System v2.0</Text>
-              <Text style={styles.footerSubtext}>© 2024 Agricultural Department</Text>
+            <View style={[styles.sidebarFooter, { borderTopColor: themeColors.border }]}>
+              <Text style={[styles.footerText, { color: themeColors.subtext }]}>AgriData System v2.0</Text>
+              <Text style={[styles.footerSubtext, { color: isDarkMode ? '#555' : '#9ca3af' }]}>© 2024 Agricultural Department</Text>
             </View>
           </View>
         </>
@@ -2076,7 +2313,7 @@ export default function DataScreen() {
               <Text style={styles.modalTitle}>
                 Edit {editingRecord?.type === 'volume' ? 'Volume' : editingRecord?.type === 'price' ? 'Price' : 'Complete'} Record
               </Text>
-              <TouchableOpacity 
+              <TouchableOpacity
                 style={styles.modalCloseButton}
                 onPress={() => setEditingRecord(null)}
               >
@@ -2094,10 +2331,38 @@ export default function DataScreen() {
               <View style={styles.pickerWrap}>
                 <Picker
                   selectedValue={editCommodity}
-                  onValueChange={(v) => setEditCommodity(v)}
+                  onValueChange={(v) => {
+                    if (v && !v.startsWith('__category__')) setEditCommodity(v);
+                  }}
                   style={styles.picker}
                 >
-                  {commodities.map((c) => <Picker.Item key={c} label={c} value={c} />)}
+                  {commodityCategories.map((cat) => [
+                    <Picker.Item
+                      key={`edit_cat_${cat.label}`}
+                      label={`━━ ${cat.label} ━━`}
+                      value={`__category__${cat.label}`}
+                      enabled={false}
+                      color="#2d6a4f"
+                    />,
+                    ...cat.items.map((c) => (
+                      <Picker.Item key={`edit_${c}`} label={`   ${c}`} value={c} />
+                    )),
+                  ]).flat()}
+                  {allCommodities.length > defaultCommodities.length && (
+                    <Picker.Item
+                      key="edit_cat_custom"
+                      label="━━ ✏️ Custom Added ━━"
+                      value="__category__custom"
+                      enabled={false}
+                      color="#2d6a4f"
+                    />
+                  )}
+                  {allCommodities
+                    .filter(c => !defaultCommodities.includes(c) && !hiddenCommodities.includes(c))
+                    .map((c) => (
+                      <Picker.Item key={`edit_${c}`} label={`   ${c}`} value={c} />
+                    ))
+                  }
                 </Picker>
               </View>
             </View>
@@ -2165,7 +2430,7 @@ export default function DataScreen() {
                   <View style={styles.averageBox}>
                     <Ionicons name="calculator-outline" size={20} color="#166534" />
                     <Text style={styles.averageText}>
-                      {editLowest && editHighest 
+                      {editLowest && editHighest
                         ? ((parseFloat(editLowest) + parseFloat(editHighest)) / 2).toFixed(2)
                         : '—'}
                     </Text>
@@ -2176,14 +2441,14 @@ export default function DataScreen() {
             )}
 
             <View style={styles.modalButtons}>
-              <TouchableOpacity 
-                style={[styles.modalButton, styles.cancelButton]} 
+              <TouchableOpacity
+                style={[styles.modalButton, styles.cancelButton]}
                 onPress={() => setEditingRecord(null)}
               >
                 <Text style={styles.cancelButtonText}>Cancel</Text>
               </TouchableOpacity>
-              <TouchableOpacity 
-                style={[styles.modalButton, styles.modalSaveButton]} 
+              <TouchableOpacity
+                style={[styles.modalButton, styles.modalSaveButton]}
                 onPress={handleEditSave}
               >
                 <Text style={styles.modalSaveButtonText}>Save Changes</Text>
@@ -2194,8 +2459,8 @@ export default function DataScreen() {
       </Modal>
 
       {isSaving && (
-        <View style={styles.loadingOverlay}>
-          <View style={styles.loadingCard}>
+        <View style={[styles.loadingOverlay, { backgroundColor: themeColors.overlay }]}>
+          <View style={[styles.loadingCard, { backgroundColor: themeColors.card }]}>
             <Ionicons name="refresh-outline" size={40} color="#2d6a4f" style={styles.spinningIcon} />
             <Text style={styles.loadingText}>Saving data...</Text>
           </View>
@@ -2203,15 +2468,15 @@ export default function DataScreen() {
       )}
 
       {showSuccess && (
-        <View style={styles.loadingOverlay}>
-          <View style={styles.successCard}>
+        <View style={[styles.loadingOverlay, { backgroundColor: themeColors.overlay }]}>
+          <View style={[styles.successCard, { backgroundColor: themeColors.card }]}>
             <View style={styles.successIcon}>
               <Ionicons name="checkmark-circle" size={60} color="#10b981" />
             </View>
-            <Text style={styles.successTitle}>Success!</Text>
-            <Text style={styles.successMessage}>{successMessage}</Text>
-            <TouchableOpacity 
-              style={styles.successButton} 
+            <Text style={[styles.successTitle, { color: themeColors.text }]}>Success!</Text>
+            <Text style={[styles.successMessage, { color: themeColors.text }]}>{successMessage}</Text>
+            <TouchableOpacity
+              style={styles.successButton}
               onPress={() => setShowSuccess(false)}
             >
               <Text style={styles.successButtonText}>Continue</Text>
@@ -2219,6 +2484,341 @@ export default function DataScreen() {
           </View>
         </View>
       )}
+
+      {/* Add Commodity Modal */}
+      <Modal
+        visible={showAddCommodity}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowAddCommodity(false)}
+      >
+        <View style={styles.loadingOverlay}>
+          <View style={styles.addCommodityModal}>
+            <View style={styles.addCommodityHeader}>
+              <Ionicons name="leaf-outline" size={28} color="#2d6a4f" />
+              <Text style={styles.addCommodityTitle}>Add New Commodity</Text>
+              <Text style={styles.addCommoditySubtitle}>Enter the commodity name and select a unit</Text>
+            </View>
+
+            <View style={styles.formGroup}>
+              <Text style={styles.label}>Commodity Name</Text>
+              <View style={styles.inputWithIcon}>
+                <Ionicons name="pricetag-outline" size={20} color="#6b7280" style={styles.inputIcon} />
+                <TextInput
+                  style={styles.input}
+                  placeholder="e.g. Corn, Mongo, etc."
+                  value={newCommodityName}
+                  onChangeText={setNewCommodityName}
+                  placeholderTextColor="#9ca3af"
+                  autoCapitalize="words"
+                />
+              </View>
+            </View>
+
+            <View style={styles.formGroup}>
+              <Text style={styles.label}>Unit of Measurement</Text>
+              <View style={styles.pickerWrap}>
+                <Picker
+                  selectedValue={newCommodityUnit}
+                  onValueChange={(v) => setNewCommodityUnit(v)}
+                  style={styles.picker}
+                >
+                  <Picker.Item label="Per Kg." value="Per Kg." />
+                  <Picker.Item label="Per Bundle" value="Per Bundle" />
+                  <Picker.Item label="Per Piece" value="Per Piece" />
+                  <Picker.Item label="Per Sack" value="Per Sack" />
+                  <Picker.Item label="Per Bugkos" value="Per Bugkos" />
+                  <Picker.Item label="Per Crate" value="Per Crate" />
+                  <Picker.Item label="Per Can" value="Per Can" />
+                  <Picker.Item label="Per Box" value="Per Box" />
+                </Picker>
+              </View>
+            </View>
+
+            {newCommodityName.trim() !== '' && (
+              <View style={styles.previewBox}>
+                <Ionicons name="eye-outline" size={16} color="#1e40af" />
+                <Text style={styles.previewText}>
+                  Preview: {newCommodityName.trim()} ({newCommodityUnit})
+                </Text>
+              </View>
+            )}
+
+            <View style={styles.modalButtons}>
+              <TouchableOpacity
+                style={[styles.modalButton, styles.cancelButton]}
+                onPress={() => {
+                  setShowAddCommodity(false);
+                  setNewCommodityName('');
+                  setNewCommodityUnit('Per Kg.');
+                }}
+              >
+                <Text style={styles.cancelButtonText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.modalButton, styles.modalSaveButton]}
+                onPress={async () => {
+                  const name = newCommodityName.trim();
+                  if (!name) {
+                    Alert.alert('Missing Name', 'Please enter a commodity name');
+                    return;
+                  }
+                  const fullName = `${name} (${newCommodityUnit})`;
+                  if (allCommodities.includes(fullName)) {
+                    Alert.alert('Duplicate', 'This commodity already exists in the list');
+                    return;
+                  }
+                  try {
+                    setIsSaving(true);
+
+                    // Save to Supabase first if online
+                    const state = await NetInfo.fetch();
+                    if (state.isConnected) {
+                      const { error } = await supabase
+                        .from('custom_commodities')
+                        .insert([{ name: fullName }]);
+
+                      if (error) {
+                        console.error('Failed to save to Supabase', error);
+                        Alert.alert('Cloud Sync Error', `Failed to save to cloud: ${error.message || JSON.stringify(error)}`);
+                        // We still continue to save locally even if Supabase fails
+                      }
+                    }
+
+                    // Save to AsyncStorage
+                    const raw = await AsyncStorage.getItem(CUSTOM_COMMODITIES_KEY);
+                    const customList: string[] = raw ? JSON.parse(raw) : [];
+                    if (!customList.includes(fullName)) {
+                      customList.push(fullName);
+                      await AsyncStorage.setItem(CUSTOM_COMMODITIES_KEY, JSON.stringify(customList));
+                    }
+
+                    const merged = [...defaultCommodities, ...customList];
+                    setAllCommodities(merged);
+                    setSelectedCommodity(fullName);
+                    setNewCommodityName('');
+                    setNewCommodityUnit('Per Kg.');
+                    setShowAddCommodity(false);
+                    Alert.alert('Success', `"${fullName}" has been added to the list!\n\nYou can now use it to save volume or price data.`);
+                  } catch (e) {
+                    console.error('Failed to add commodity', e);
+                    Alert.alert('Error', 'Failed to save new commodity');
+                  } finally {
+                    setIsSaving(false);
+                  }
+                }}
+              >
+                <Text style={styles.modalSaveButtonText}>Add Commodity</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Edit Custom Commodity Modal */}
+      <Modal
+        visible={!!editingCustomCommodity}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setEditingCustomCommodity(null)}
+      >
+        <View style={styles.loadingOverlay}>
+          <View style={styles.addCommodityModal}>
+            <View style={styles.addCommodityHeader}>
+              <Ionicons name="create-outline" size={28} color="#3b82f6" />
+              <Text style={styles.addCommodityTitle}>Edit Custom Commodity</Text>
+              <Text style={styles.addCommoditySubtitle}>Update name or unit of measurement</Text>
+            </View>
+
+            <View style={styles.formGroup}>
+              <Text style={styles.label}>Commodity Name</Text>
+              <View style={styles.inputWithIcon}>
+                <Ionicons name="pricetag-outline" size={20} color="#6b7280" style={styles.inputIcon} />
+                <TextInput
+                  style={styles.input}
+                  placeholder="e.g. Corn, Mongo, etc."
+                  value={editCustomCommodityName}
+                  onChangeText={setEditCustomCommodityName}
+                  placeholderTextColor="#9ca3af"
+                  autoCapitalize="words"
+                />
+              </View>
+            </View>
+
+            <View style={styles.formGroup}>
+              <Text style={styles.label}>Unit of Measurement</Text>
+              <View style={styles.pickerWrap}>
+                <Picker
+                  selectedValue={editCustomCommodityUnit}
+                  onValueChange={(v) => setEditCustomCommodityUnit(v)}
+                  style={styles.picker}
+                >
+                  <Picker.Item label="Per Kg." value="Per Kg." />
+                  <Picker.Item label="Per Bundle" value="Per Bundle" />
+                  <Picker.Item label="Per Piece" value="Per Piece" />
+                  <Picker.Item label="Per Sack" value="Per Sack" />
+                  <Picker.Item label="Per Bugkos" value="Per Bugkos" />
+                  <Picker.Item label="Per Crate" value="Per Crate" />
+                  <Picker.Item label="Per Can" value="Per Can" />
+                  <Picker.Item label="Per Box" value="Per Box" />
+                </Picker>
+              </View>
+            </View>
+
+            {editCustomCommodityName.trim() !== '' && (
+              <View style={styles.previewBox}>
+                <Ionicons name="eye-outline" size={16} color="#1e40af" />
+                <Text style={styles.previewText}>
+                  Preview: {editCustomCommodityName.trim()} ({editCustomCommodityUnit})
+                </Text>
+              </View>
+            )}
+
+            <View style={styles.modalButtons}>
+              <TouchableOpacity
+                style={[styles.modalButton, styles.cancelButton]}
+                onPress={() => setEditingCustomCommodity(null)}
+              >
+                <Text style={styles.cancelButtonText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.modalButton, styles.modalSaveButton]}
+                onPress={async () => {
+                  if (!editingCustomCommodity) return;
+                  const name = editCustomCommodityName.trim();
+                  if (!name) {
+                    Alert.alert('Missing Name', 'Please enter a commodity name');
+                    return;
+                  }
+                  const newFullName = `${name} (${editCustomCommodityUnit})`;
+
+                  if (newFullName === editingCustomCommodity) {
+                    setEditingCustomCommodity(null);
+                    return;
+                  }
+
+                  if (allCommodities.includes(newFullName)) {
+                    Alert.alert('Duplicate', 'This commodity already exists in the list');
+                    return;
+                  }
+
+                  try {
+                    setIsSaving(true);
+                    const isDefault = defaultCommodities.includes(editingCustomCommodity);
+                    const state = await NetInfo.fetch();
+                    const isOnline = !!state.isConnected;
+
+                    if (isDefault) {
+                      // Create as custom and hide default
+                      if (isOnline) {
+                        await supabase.from('custom_commodities').insert([{ name: newFullName }]);
+                      }
+                      const raw = await AsyncStorage.getItem(CUSTOM_COMMODITIES_KEY);
+                      const customList: string[] = raw ? JSON.parse(raw) : [];
+                      if (!customList.includes(newFullName)) {
+                        customList.push(newFullName);
+                        await AsyncStorage.setItem(CUSTOM_COMMODITIES_KEY, JSON.stringify(customList));
+                      }
+                      
+                      let newHidden = [...hiddenCommodities];
+                      if (!newHidden.includes(editingCustomCommodity)) {
+                        newHidden.push(editingCustomCommodity);
+                        await AsyncStorage.setItem(HIDDEN_COMMODITIES_KEY, JSON.stringify(newHidden));
+                        setHiddenCommodities(newHidden);
+                      }
+                      
+                      setAllCommodities([...defaultCommodities, ...customList]);
+                      setSelectedCommodity(newFullName);
+                    } else {
+                      if (isOnline) {
+                        // 1. Update Custom Commodities table
+                        const { error: customError } = await supabase
+                          .from('custom_commodities')
+                          .update({ name: newFullName })
+                          .eq('name', editingCustomCommodity);
+
+                        if (customError) throw customError;
+
+                        // 2. Update Volume historical records
+                        await supabase.from('agri_volume').update({ commodity: newFullName }).eq('commodity', editingCustomCommodity);
+                        // 3. Update Price historical records
+                        await supabase.from('agri_price').update({ commodity: newFullName }).eq('commodity', editingCustomCommodity);
+                      }
+
+                      // Update AsyncStorage
+                      const raw = await AsyncStorage.getItem(CUSTOM_COMMODITIES_KEY);
+                      let customList: string[] = raw ? JSON.parse(raw) : [];
+                      customList = customList.map(c => c === editingCustomCommodity ? newFullName : c);
+                      await AsyncStorage.setItem(CUSTOM_COMMODITIES_KEY, JSON.stringify(customList));
+
+                      setAllCommodities([...defaultCommodities, ...customList]);
+                      if (selectedCommodity === editingCustomCommodity) setSelectedCommodity(newFullName);
+                    }
+
+                    Alert.alert('Success', isDefault ? 'Default overridden with custom version!' : 'Updated!');
+                    setEditingCustomCommodity(null);
+                  } catch (e) {
+                    console.error('Failed to update commodity', e);
+                    Alert.alert('Error', 'Failed to update commodity');
+                  } finally {
+                    setIsSaving(false);
+                  }
+                }}
+              >
+                <Text style={styles.modalSaveButtonText}>
+                  {defaultCommodities.includes(editingCustomCommodity!) ? 'Create Override' : 'Save Changes'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Profile Viewer Modal */}
+      <Modal
+        visible={showProfileViewer}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowProfileViewer(false)}
+      >
+        <View style={styles.viewerOverlay}>
+          <TouchableOpacity
+            style={styles.viewerCloseArea}
+            onPress={() => setShowProfileViewer(false)}
+            activeOpacity={1}
+          />
+          <View style={styles.viewerContent}>
+            <View style={styles.viewerImageContainer}>
+              {collectorImage ? (
+                <Image source={{ uri: collectorImage }} style={styles.viewerImage} resizeMode="contain" />
+              ) : (
+                <View style={styles.viewerIconFallback}>
+                  <Ionicons name="person" size={120} color="#9ca3af" />
+                </View>
+              )}
+            </View>
+            <View style={styles.viewerActions}>
+              <TouchableOpacity
+                style={styles.viewerUpdateBtn}
+                onPress={() => {
+                  setShowProfileViewer(false);
+                  updateProfilePicture();
+                }}
+              >
+                <Ionicons name="camera" size={20} color="#fff" />
+                <Text style={styles.viewerUpdateText}>Change Picture</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.viewerCloseBtn}
+                onPress={() => setShowProfileViewer(false)}
+              >
+                <Text style={styles.viewerCloseText}>Close</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
     </KeyboardAvoidingView>
   );
 }
@@ -2559,7 +3159,7 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '700',
   },
-  
+
   // Activities Card Styles
   activitiesCard: {
     backgroundColor: '#fff',
@@ -3234,16 +3834,16 @@ const styles = StyleSheet.create({
     position: 'relative',
   },
   sidebarProfileImg: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
+    width: 80,
+    height: 80,
+    borderRadius: 40,
     borderWidth: 3,
     borderColor: 'rgba(255, 255, 255, 0.2)',
   },
   sidebarProfileIcon: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
+    width: 80,
+    height: 80,
+    borderRadius: 40,
     backgroundColor: 'rgba(255, 255, 255, 0.2)',
     justifyContent: 'center',
     alignItems: 'center',
@@ -3437,5 +4037,220 @@ const styles = StyleSheet.create({
     color: '#6b7280',
     marginTop: 12,
     fontWeight: '500',
+  },
+  addCommodityBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#2d6a4f',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 20,
+    gap: 4,
+  },
+  addCommodityBtnText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  addCommodityModal: {
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    padding: 24,
+    width: '90%',
+    maxWidth: 420,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 12,
+    elevation: 8,
+  },
+  addCommodityHeader: {
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  addCommodityTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#1f2937',
+    marginTop: 8,
+  },
+  addCommoditySubtitle: {
+    fontSize: 13,
+    color: '#6b7280',
+    marginTop: 4,
+    textAlign: 'center',
+  },
+  previewBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#eff6ff',
+    borderLeftWidth: 3,
+    borderLeftColor: '#3b82f6',
+    padding: 12,
+    borderRadius: 8,
+    marginBottom: 16,
+    gap: 8,
+  },
+  previewText: {
+    fontSize: 14,
+    color: '#1e40af',
+    fontWeight: '600',
+    flex: 1,
+  },
+  viewerOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.85)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  viewerCloseArea: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+  },
+  viewerContent: {
+    width: '100%',
+    maxWidth: 400,
+    backgroundColor: '#fff',
+    borderRadius: 24,
+    padding: 24,
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.3,
+    shadowRadius: 20,
+    elevation: 10,
+  },
+  viewerImageContainer: {
+    width: '100%',
+    aspectRatio: 1,
+    backgroundColor: '#f3f4f6',
+    borderRadius: 16,
+    overflow: 'hidden',
+    marginBottom: 24,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  viewerImage: {
+    width: '100%',
+    height: '100%',
+  },
+  viewerIconFallback: {
+    width: '100%',
+    height: '100%',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  viewerActions: {
+    flexDirection: 'row',
+    width: '100%',
+    gap: 12,
+  },
+  viewerUpdateBtn: {
+    flex: 2,
+    flexDirection: 'row',
+    backgroundColor: '#3b82f6',
+    paddingVertical: 14,
+    borderRadius: 12,
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 8,
+  },
+  viewerUpdateText: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  viewerCloseBtn: {
+    flex: 1,
+    backgroundColor: '#f3f4f6',
+    paddingVertical: 14,
+    borderRadius: 12,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  viewerCloseText: {
+    color: '#4b5563',
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  manageItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#f9fafb',
+    padding: 12,
+    borderRadius: 12,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+  },
+  manageItemInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flex: 1,
+  },
+  manageItemText: {
+    fontSize: 14,
+    color: '#1f2937',
+    fontWeight: '600',
+  },
+  manageItemActions: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  manageEditBtn: {
+    backgroundColor: '#eff6ff',
+    padding: 8,
+    borderRadius: 8,
+  },
+  manageDeleteBtn: {
+    backgroundColor: '#fee2e2',
+    padding: 8,
+    borderRadius: 8,
+  },
+  emptyManageList: {
+    alignItems: 'center',
+    padding: 20,
+    gap: 10,
+  },
+  emptyManageText: {
+    fontSize: 14,
+    color: '#6b7280',
+    textAlign: 'center',
+  },
+  themeToggle: {
+    width: 44,
+    height: 22,
+    borderRadius: 11,
+    padding: 2,
+    justifyContent: 'center',
+  },
+  themeToggleActive: {
+    backgroundColor: '#2d6a4f',
+  },
+  themeToggleInactive: {
+    backgroundColor: '#d1d5db',
+  },
+  themeToggleCircle: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: '#fff',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.2,
+    shadowRadius: 1.5,
+    elevation: 2,
+  },
+  themeToggleCircleActive: {
+    alignSelf: 'flex-end',
+  },
+  themeToggleCircleInactive: {
+    alignSelf: 'flex-start',
   },
 });

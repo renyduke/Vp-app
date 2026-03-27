@@ -4,17 +4,17 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useRouter } from 'expo-router';
 import { useState } from 'react';
 import {
-  Alert,
-  Image,
-  Keyboard,
-  KeyboardAvoidingView,
-  Platform,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View,
+    Alert,
+    Image,
+    Keyboard,
+    KeyboardAvoidingView,
+    Platform,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TextInput,
+    TouchableOpacity,
+    View,
 } from 'react-native';
 import { supabase } from '../src/supabaseClient';
 
@@ -22,21 +22,9 @@ export default function LoginScreen() {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
-  const [isRegistering, setIsRegistering] = useState(false);
-  const [registrationKey, setRegistrationKey] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   
   const router = useRouter();
-  const REGISTRATION_KEY = 'AGRI2024';
-
-  // Clear inputs when toggling between login/register
-  const handleToggleMode = () => {
-    setIsRegistering(!isRegistering);
-    setUsername('');
-    setPassword('');
-    setRegistrationKey('');
-    setShowPassword(false);
-  };
 
   // Handle Login
   const handleLogin = async () => {
@@ -89,75 +77,7 @@ export default function LoginScreen() {
     }
   };
 
-  // Handle Registration
-  const handleRegister = async () => {
-    if (!username || !password) {
-      Alert.alert('Missing Fields', 'Please enter both username and password');
-      return;
-    }
 
-    if (registrationKey.trim() !== REGISTRATION_KEY) {
-      Alert.alert('Invalid Key', 'The registration key is incorrect');
-      return;
-    }
-
-    setIsLoading(true);
-    Keyboard.dismiss();
-
-    try {
-      const trimmedUsername = username.trim();
-      const trimmedPassword = password.trim();
-      
-      const { data: existingUser } = await supabase
-        .from('users')
-        .select('username')
-        .eq('username', trimmedUsername)
-        .maybeSingle();
-
-      if (existingUser) {
-        Alert.alert('Username Taken', 'This username already exists');
-        setIsLoading(false);
-        return;
-      }
-
-      const { error } = await supabase
-        .from('users')
-        .insert([
-          {
-            username: trimmedUsername,
-            password: trimmedPassword,
-            created_at: new Date().toISOString(),
-          },
-        ]);
-
-      if (error) {
-        console.error('Registration error:', error);
-        throw error;
-      }
-
-      setIsLoading(false);
-      Alert.alert(
-        '✓ Registration Successful',
-        'Your account has been created! You can now log in.',
-        [
-          {
-            text: 'OK',
-            onPress: () => {
-              setIsRegistering(false);
-              setUsername('');
-              setPassword('');
-              setRegistrationKey('');
-              setShowPassword(false);
-            },
-          },
-        ]
-      );
-    } catch (err: any) {
-      console.error('Registration catch error:', err);
-      Alert.alert('Error', 'Failed to create account: ' + (err.message || 'Unknown error'));
-      setIsLoading(false);
-    }
-  };
 
   return (
     <KeyboardAvoidingView
@@ -174,14 +94,8 @@ export default function LoginScreen() {
             style={styles.logo}
             resizeMode="contain"
           />
-          <Text style={styles.title}>
-            {isRegistering ? '📝 Create Account' : '🔒 Secure Access'}
-          </Text>
-          <Text style={styles.subtitle}>
-            {isRegistering
-              ? 'Register a new account'
-              : 'Enter your credentials to continue'}
-          </Text>
+          <Text style={styles.title}>🔒 Secure Access</Text>
+          <Text style={styles.subtitle}>Enter your credentials to continue</Text>
 
           <View style={styles.inputContainer}>
             <Ionicons name="person-outline" size={20} color="#666" style={styles.icon} />
@@ -218,50 +132,15 @@ export default function LoginScreen() {
             </TouchableOpacity>
           </View>
 
-          {isRegistering && (
-            <View style={styles.inputContainer}>
-              <Ionicons name="key-outline" size={20} color="#666" style={styles.icon} />
-              <TextInput
-                style={styles.input}
-                placeholder="Registration Key"
-                value={registrationKey}
-                onChangeText={setRegistrationKey}
-                placeholderTextColor="#aaa"
-                autoCapitalize="characters"
-              />
-            </View>
-          )}
-
           <TouchableOpacity
             style={[styles.button, isLoading && styles.buttonDisabled]}
-            onPress={isRegistering ? handleRegister : handleLogin}
+            onPress={handleLogin}
             disabled={isLoading}
           >
             <Text style={styles.buttonText}>
-              {isLoading ? 'Processing...' : isRegistering ? 'Register' : 'Login'}
+              {isLoading ? 'Processing...' : 'Login'}
             </Text>
           </TouchableOpacity>
-
-          <TouchableOpacity
-            style={styles.toggleButton}
-            onPress={handleToggleMode}
-            disabled={isLoading}
-          >
-            <Text style={styles.toggleText}>
-              {isRegistering
-                ? 'Already have an account? Login'
-                : "Don't have an account? Register"}
-            </Text>
-          </TouchableOpacity>
-
-          {isRegistering && (
-            <View style={styles.infoBox}>
-              <Ionicons name="information-circle-outline" size={18} color="#2d6a4f" />
-              <Text style={styles.infoText}>
-                You need a registration key to create an account
-              </Text>
-            </View>
-          )}
         </View>
       </ScrollView>
     </KeyboardAvoidingView>
@@ -345,31 +224,5 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 16,
     fontWeight: '700',
-  },
-  toggleButton: {
-    marginTop: 16,
-    paddingVertical: 8,
-  },
-  toggleText: {
-    color: '#2d6a4f',
-    fontSize: 14,
-    fontWeight: '500',
-  },
-  infoBox: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#f0fdf4',
-    borderWidth: 1,
-    borderColor: '#86efac',
-    borderRadius: 8,
-    padding: 12,
-    marginTop: 16,
-    width: '100%',
-  },
-  infoText: {
-    fontSize: 12,
-    color: '#166534',
-    marginLeft: 8,
-    flex: 1,
   },
 });

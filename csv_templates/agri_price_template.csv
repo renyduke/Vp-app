@@ -1,0 +1,4 @@
+year,month,week,commodity,lowest_price,highest_price,average_price,encoded_by,encoded_at
+2024,3,1,"Rice (Per Kg.)",45.00,52.00,48.50,JohnDoe,2024-03-01T08:00:00Z
+2024,3,1,"Corn (Per Kg.)",30.00,35.00,32.50,JohnDoe,2024-03-01T08:30:00Z
+2024,3,1,"Cauliflower (Per Kg.)",120.00,150.00,135.00,JohnDoe,2024-03-01T09:00:00Z
